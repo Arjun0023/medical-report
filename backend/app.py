@@ -1,211 +1,272 @@
+import streamlit as st
 import os
 import tempfile
-import traceback
-from typing import Optional
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from dotenv import load_dotenv
 import google.generativeai as genai
+import time
 
-# Import the CORSMiddleware
-from fastapi.middleware.cors import CORSMiddleware
+# Load environment variables from .env file
+load_dotenv()
 
-app = FastAPI(title="Medical Report Analyzer",
-              description="API for analyzing medical reports using Gemini API")
-
-# Configure CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins (very permissive for development)
-    allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+# Set page configuration
+st.set_page_config(
+    page_title="Medical Report Analyzer",
+    page_icon="🏥",
+    layout="wide",
 )
 
-class AnalysisResult(BaseModel):
-    report: str
+# Custom CSS to improve the appearance
+st.markdown("""
+<style>
+    .title {
+        font-size: 42px;
+        font-weight: bold;
+        color: #1E88E5;
+        margin-bottom: 20px;
+    }
+    .subtitle {
+        font-size: 24px;
+        font-weight: 500;
+        color: #424242;
+        margin-bottom: 30px;
+    }
+    .report-header {
+        font-size: 28px;
+        font-weight: bold;
+        color: #1E88E5;
+        margin-top: 20px;
+        margin-bottom: 10px;
+    }
+    .section-header {
+        font-size: 22px;
+        font-weight: bold;
+        color: #424242;
+        margin-top: 15px;
+        margin-bottom: 10px;
+    }
+    .normal {
+        color: green;
+        font-weight: bold;
+    }
+    .borderline {
+        color: orange;
+        font-weight: bold;
+    }
+    .concerning {
+        color: red;
+        font-weight: bold;
+    }
+    .stProgress > div > div > div > div {
+        background-color: #1E88E5;
+    }
+    .upload-section {
+        background-color: #f5f5f5;
+        padding: 20px;
+        border-radius: 10px;
+        margin-bottom: 20px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-@app.on_event("startup")
-async def startup_event():
-    # Check if API key is available
-    if not os.environ.get("GEMINI_API_KEY"):
-        print("Warning: GEMINI_API_KEY environment variable not set")
-
-@app.post("/analyze", response_model=AnalysisResult)
-async def analyze_medical_report(file: UploadFile = File(...)):
-    """
-    Analyze a medical report PDF using Gemini API.
-
-    - **file**: PDF file containing medical report data
-
-    Returns a structured, human-friendly medical report analysis.
-    """
-    print(f"Received file: {file.filename}")
-    
-    # Validate file type
-    if not file.filename.endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported")
-
-    # Ensure API key is available
-    api_key = os.environ.get("GEMINI_API_KEY")
+def process_pdf_with_gemini(uploaded_file):
+    """Process the PDF file using Google Gemini API"""
+    # Get API key from environment variable
+    api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=500, detail="Gemini API key not configured")
-
-    print("API key validated")
-    temp_path = None
+        st.error("❌ Gemini API key not found in .env file. Please add GEMINI_API_KEY to your .env file.")
+        return None
+    
+    # Initialize Gemini API
+    genai.configure(api_key=api_key)
+    
+    # Save uploaded file to a temporary file
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
+        temp_file.write(uploaded_file.getvalue())
+        temp_path = temp_file.name
     
     try:
-        # Create a temporary file to store the uploaded PDF
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
-            # Write uploaded file content to temp file
-            content = await file.read()
-            print(f"Read {len(content)} bytes from uploaded file")
-            temp_file.write(content)
-            temp_path = temp_file.name
-            print(f"Saved to temporary file: {temp_path}")
-
-        # Initialize Gemini client
-        print("Configuring Gemini API")
-        genai.configure(api_key=api_key)
-
         # System prompt for Gemini
-        system_prompt = """Please analyze the provided medical report PDF and follow these instructions:
+        system_instruction = """🔹 Task:
+    Analyze the provided biomarker data and generate a structured, human-friendly medical report.
 
-1. Overall Summary:
-   - Provide a clear, detailed overview of the report.
-   - Highlight any significant trends, abnormalities, or notable findings.
-   - Use simple language so a non-medical person can understand.
+    ### ***Instructions***:
 
-2. Potential Diagnoses:
-   - Suggest possible medical conditions based on abnormal biomarker values.
-   - Use probability-based language (e.g., "This may indicate...", "There is a possibility of...").
-   - Explain how each abnormal biomarker relates to potential diagnoses.
-   - Avoid definitive medical conclusions—this is for informational purposes only.
+    1️⃣ Overall Summary: (This Points must be included )
+    Provide a clear, detailed overview of the report.
+    Highlight any significant trends, abnormalities, or notable findings.
+    Use simple language so a non-medical person can understand.
 
-3. Medical Recommendations:
-   - Provide actionable health advice based on the findings.
-   - Include dietary, lifestyle, and medical check-up recommendations.
-   - If necessary, suggest consulting a doctor for further evaluation.
+    2️⃣ Potential Diagnoses: (This Points must be included )
+    Suggest possible medical conditions based on abnormal biomarker values.
+    Use probability-based language (e.g., "This may indicate...", "There is a possibility of...").
+    Explain how each abnormal biomarker relates to potential diagnoses.
+    Avoid definitive medical conclusions—this is for informational purposes only.
 
-Use easy-to-understand language and explain each biomarker's role with real-world analogies.
-Use a traffic light system 🚦 to indicate risk:
-- 🟢 Normal: Healthy range, no concern.
-- 🟡 Borderline: Slightly off, needs monitoring.
-- 🔴 Concerning: Needs medical attention.
+   3️⃣Medical Recommendations: (This Points must be included )
+    Provide actionable health advice based on the findings.
+    Include dietary, lifestyle, and medical check-up recommendations.
+    If necessary, suggest consulting a doctor for further evaluation.
 
-Format your response to include:
-- Medical Report Summary
-- Biomarker Analysis with Overall Summary, Potential Diagnoses, and Medical Recommendations
-- What's Good? section
-- What Needs Attention? section
-- What Should You Do? section"""
+   ### **How to Analyze:**
+    - Use **easy-to-understand language**.
+    - Definition: A simple explanation of what it is.
+    - Function: Why it is important for health.
+    - Implications: What an abnormal value could indicate.
+    - Explain one line definition
+    - Explain each biomarker's role with **real-world analogies**.
+    - Use a **traffic light system** 🚦 to indicate risk: (This Points must be included and use color so easy understanding)
+      - 🟢 **Normal**: Healthy range, no concern.
+      - 🟡 **Borderline**: Slightly off, needs monitoring.
+      - 🔴 **Concerning**: Needs medical attention.
+    - Explain **why it matters** for health.
+    - Provide **simple lifestyle & diet tips**.
 
-        # Create a generative model - compatible with older versions
-        print("Creating generative model")
-        try:
-            # Create the model with basic parameters
-            generation_config = {
-                "temperature": 1.0,
-                "top_p": 0.95,
-                "top_k": 40,
-                "max_output_tokens": 8192,
-            }
+    ### **Format Output Like This:**
+
+    📋 **Medical Report Summary**
+
+    ### **Biomarker Analysis**
+
+      This Points must be included
+    - Overall Summary
+    - Potential Diagnoses
+    - Medical Recommendations
+
+    ✅ **What's Good?** (This Points must be included )
+    - Hemoglobin: 14.2 g/dL 🟢 (Normal) - Your oxygen levels are good!
+    - Calcium: 9.5 mg/dL 🟢 (Normal) - Great for bones & muscles.
+
+    ⚠️ **What Needs Attention?** (This Points must be included )
+
+    - Cholesterol: 210 mg/dL 🟡 (Borderline) - Slightly high, keep an eye on diet.
+
+    🏥 **What Should You Do?** (This Points must be included )
+    - Do this step for all biomarker present
+    - Do it as the example is given
+    - **Cholesterol:** 🔴 (High) → Risk of heart issues. Try adding fiber (oats, nuts), avoid fried food."""
+        
+        # Create a Gemini model
+        model = genai.GenerativeModel('gemini-2.0-flash')
+        
+        # Create a generation config
+        generation_config = {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "top_k": 40,
+            "max_output_tokens": 8192,
+        }
+        
+        # Generate content with progress bar
+        with st.spinner("Analyzing medical report... This may take a minute"):
+            progress_bar = st.progress(0)
+            for i in range(100):
+                time.sleep(0.03)  # Simulate processing time
+                progress_bar.progress(i + 1)
             
-            model = genai.GenerativeModel(
-                model_name="gemini-1.5-pro",  # Using more widely available model
+            # Use the correct method to process the PDF
+            with open(temp_path, 'rb') as f:
+                pdf_data = f.read()
+            
+            # Generate the content
+            response = model.generate_content(
+                contents=[
+                    {
+                        "parts": [
+                            {"text": system_instruction},
+                            {"inline_data": {"mime_type": "application/pdf", "data": pdf_data}}
+                        ]
+                    }
+                ],
                 generation_config=generation_config
             )
             
-            print("Model created successfully")
-        except Exception as model_error:
-            print(f"Error creating model: {str(model_error)}")
-            print(traceback.format_exc())
-            raise HTTPException(
-                status_code=500, 
-                detail=f"Error creating Gemini model: {str(model_error)}"
-            )
-        
-        # Process the PDF file - read as binary
-        print(f"Reading PDF file from {temp_path}")
-        with open(temp_path, "rb") as f:
-            file_data = f.read()
-            print(f"Read {len(file_data)} bytes from PDF file")
-        
-        # Generate content with the PDF data
-        print("Attempting to generate content")
-        try:
-            # Send the PDF along with the system prompt
-            response = model.generate_content(
-                [system_prompt,
-                 {"mime_type": "application/pdf", "data": file_data}]
-            )
-            
-            print("Content generation successful")
-            
             # Extract the result
             result = response.text
-            print(f"Response length: {len(result)} characters")
-        except Exception as gen_error:
-            print(f"Error generating content: {str(gen_error)}")
-            print(traceback.format_exc())
-            raise HTTPException(
-                status_code=500, 
-                detail=f"Error generating content: {str(gen_error)}"
-            )
-
+        
         # Clean up the temporary file
+        os.unlink(temp_path)
+        
+        return result
+    
+    except Exception as e:
+        # Clean up temp file
         try:
             os.unlink(temp_path)
-            print(f"Deleted temporary file: {temp_path}")
-            temp_path = None
-        except Exception as cleanup_error:
-            print(f"Error cleaning up temp file: {str(cleanup_error)}")
-
-        return AnalysisResult(report=result)
-
-    except Exception as e:
-        # Clean up temp file if it exists
-        if temp_path:
-            try:
-                os.unlink(temp_path)
-                print(f"Cleaned up temp file during exception handling: {temp_path}")
-            except:
-                print("Failed to clean up temp file during exception")
-                pass
-
-        error_traceback = traceback.format_exc()
-        print(f"ERROR: {str(e)}")
-        print(error_traceback)
+        except:
+            pass
         
-        return JSONResponse(
-            status_code=500,
-            content={"detail": f"Error analyzing report: {str(e)}", "traceback": error_traceback}
-        )
+        st.error(f"❌ Error analyzing the report: {str(e)}")
+        return None
 
-@app.get("/test")
-async def test_endpoint():
-    """
-    Simple test endpoint to verify the API is running properly
-    """
-    try:
-        # Try to get the version of the google-generativeai library
-        version = getattr(genai, "__version__", "unknown")
-        return {
-            "status": "API is running", 
-            "api_key_set": bool(os.environ.get("GEMINI_API_KEY")),
-            "library_version": version
-        }
-    except Exception as e:
-        return {
-            "status": "API is running, but encountered an error", 
-            "error": str(e)
-        }
+def render_markdown_with_colored_indicators(text):
+    """Format the text with colored indicators"""
+    # Replace specific indicators with colored spans
+    text = text.replace("🟢 (Normal)", "<span class='normal'>🟢 (Normal)</span>")
+    text = text.replace("🟡 (Borderline)", "<span class='borderline'>🟡 (Borderline)</span>")
+    text = text.replace("🔴 (Low)", "<span class='concerning'>🔴 (Low)</span>")
+    text = text.replace("🔴 (High)", "<span class='concerning'>🔴 (High)</span>")
+    text = text.replace("🔴 (Concerning)", "<span class='concerning'>🔴 (Concerning)</span>")
+    
+    return text
 
-@app.get("/")
-async def root():
-    return {"message": "Medical Report Analysis API is running. Use /analyze endpoint to analyze reports."}
+def main():
+    # App Header
+    st.markdown("<div class='title'>🏥 Medical Report Analyzer</div>", unsafe_allow_html=True)
+    st.markdown("<div class='subtitle'>Upload your medical report for a comprehensive analysis</div>", unsafe_allow_html=True)
+    
+    # Sidebar information
+    with st.sidebar:
+        st.image("https://img.freepik.com/free-vector/medical-report-concept-illustration_114360-1765.jpg?size=338&ext=jpg&ga=GA1.1.1826414947.1709856000&semt=ais", width=250)
+        st.markdown("### How It Works")
+        st.markdown("""
+        1. Upload your medical report PDF
+        2. Our AI analyzes your biomarkers
+        3. Get a comprehensive analysis with:
+           - Overall health summary
+           - Potential diagnoses
+           - Personalized recommendations
+        """)
+        
+        st.markdown("### About")
+        st.markdown("""
+        This application uses Google's Gemini 2.0 Flash model to analyze medical reports and provide insights in an easy-to-understand format.
+        
+        ⚠️ **Disclaimer**: This tool is for informational purposes only and does not replace professional medical advice.
+        """)
+    
+    # File Upload Section
+    st.markdown("<div class='upload-section'>", unsafe_allow_html=True)
+    uploaded_file = st.file_uploader("Upload your medical report (PDF)", type="pdf")
+    
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        analyze_button = st.button("🔍 Analyze Report", type="primary", disabled=not uploaded_file)
+    with col2:
+        if not uploaded_file:
+            st.info("Please upload a PDF file of your medical report to get started")
+    st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Analysis and Results
+    if uploaded_file and analyze_button:
+        st.markdown("<div class='report-header'>📋 Analysis Results</div>", unsafe_allow_html=True)
+        
+        # Process the PDF with Gemini
+        result = process_pdf_with_gemini(uploaded_file)
+        
+        if result:
+            # Format and display the result with colored indicators
+            formatted_result = render_markdown_with_colored_indicators(result)
+            st.markdown(formatted_result, unsafe_allow_html=True)
+            
+            # Add download button for the report
+            st.download_button(
+                label="📥 Download Report",
+                data=result,
+                file_name="medical_report_analysis.md",
+                mime="text/markdown",
+            )
+        else:
+            st.error("Failed to analyze the report. Please try again.")
 
 if __name__ == "__main__":
-    import uvicorn
-    print("Starting server on port 8002...")
-    uvicorn.run(app, host="0.0.0.0", port=8002)
+    main()
